@@ -17,8 +17,6 @@ public class MenuMusicPlayer : MonoBehaviour
             return;
         }
 
-        DontDestroyOnLoad(gameObject);
-
         // Set up audio source
         audioSource = gameObject.AddComponent<AudioSource>();
         audioSource.clip = menuMusic;
