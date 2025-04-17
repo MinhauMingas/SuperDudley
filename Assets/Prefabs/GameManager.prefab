@@ -12,6 +12,7 @@ GameObject:
   - component: {fileID: 1606568085466694595}
   - component: {fileID: 5395358843850986487}
   - component: {fileID: 2901692232833480149}
+  - component: {fileID: 5872924757792784530}
   m_Layer: 0
   m_Name: GameManager
   m_TagString: Untagged
@@ -72,3 +73,43 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   coinText: {fileID: 0}
+--- !u!114 &5872924757792784530
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 4995636322947229779}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7ed54332d1b537543ab01d411c0bac3d, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  musicTracks:
+  - name: GhostShipOST
+    clip: {fileID: 8300000, guid: 515d37c09afc41a438deeb074c7e95bb, type: 3}
+    volume: 0.2
+    loop: 1
+  - name: PirateOST
+    clip: {fileID: 8300000, guid: 4b14314fb01ed404c97357dc689bede7, type: 3}
+    volume: 0.2
+    loop: 1
+  musicCrossfadeDuration: 2
+  ambienceTracks:
+  - name: BeachAMB
+    clip: {fileID: 8300000, guid: b7e990889bdcc8c47bd9b4e889dd02db, type: 3}
+    volume: 0.3
+    loop: 1
+  - name: GhostAMB
+    clip: {fileID: 8300000, guid: 515d37c09afc41a438deeb074c7e95bb, type: 3}
+    volume: 0.3
+    loop: 1
+  ambienceCrossfadeDuration: 1
+  sfxTracks:
+  - name: StarCollected
+    clip: {fileID: 8300000, guid: aecbc69df586b994399c26d629ee0a95, type: 3}
+    volume: 0.7
+    loop: 0
+  sfxMasterVolume: 0.9
+  sfxAmbienceDuckAmount: 0.5
+  sfxAmbienceDuckDuration: 0.5

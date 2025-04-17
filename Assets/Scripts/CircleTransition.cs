@@ -7,77 +7,101 @@ using System.Collections;
 
 public class CircleTransition : MonoBehaviour
 {
-    [Header("Video Player Objects")]
-    public VideoPlayer startVideoPlayer;
-    public VideoPlayer endVideoPlayer;
+    // --- Singleton Accessor ---
+    // Provides a public static way to get the single instance of CircleTransition
+    public static CircleTransition Instance { get; private set; }
+    // --- End Singleton ---
 
-    [Header("Raw Image Objects")]
+    [Header("References (Assign in Inspector)")]
+    [Tooltip("VideoPlayer for the transition start effect.")]
+    public VideoPlayer startVideoPlayer;
+    [Tooltip("VideoPlayer for the transition end effect.")]
+    public VideoPlayer endVideoPlayer;
+    [Tooltip("RawImage to display the start transition video.")]
     public RawImage startRawImage;
+    [Tooltip("RawImage to display the end transition video.")]
     public RawImage endRawImage;
+    [Tooltip("Canvas holding all transition UI elements.")]
+    public Canvas transitionEffectCanvas; // Assign the parent Canvas
 
     [Header("Audio Clips")]
+    [Tooltip("Sound played when the transition starts.")]
     public AudioClip startTransitionSound;
+    [Tooltip("Sound played when the new scene appears.")]
     public AudioClip endTransitionSound;
 
     [Header("Transition Timing")]
+    [Tooltip("Duration of the start transition video/animation.")]
     public float startVideoDuration = 1.7f;
+    [Tooltip("Duration of the end transition video/animation.")]
     public float endVideoDuration = 1.25f;
 
     private AudioSource audioSource;
-    private bool isTransitioning;
-    private Canvas transitionEffectCanvas;
-    private string targetSceneNameToLoad = null; // Holds the specific scene target
+    private bool isTransitioning = false; // Flag to prevent overlapping transitions
+    private string targetSceneNameToLoad = null; // For loading specific scenes by name/path
 
     void Awake()
     {
-        var existingTransitions = FindObjectsByType<CircleTransition>(FindObjectsSortMode.None);
-        if (existingTransitions.Length > 1)
+        // --- Singleton Implementation ---
+        if (Instance != null && Instance != this)
         {
-            Debug.LogWarning("CircleTransition: Duplicate instance detected. Destroying self.", gameObject);
+            // If an instance already exists and it's not this one, destroy this duplicate.
+            Debug.LogWarning($"CircleTransition: Duplicate instance detected ({gameObject.name}). Destroying self. Using existing instance: {Instance.gameObject.name}.", gameObject);
             Destroy(gameObject);
-            return;
+            return; // Stop execution for this duplicate instance
         }
+        else if (Instance == null)
+        {
+            // If no instance exists, this becomes the singleton instance.
+            Instance = this;
+            DontDestroyOnLoad(gameObject); // Persist this GameObject across scene loads
+            Debug.Log($"CircleTransition: Singleton instance established ({gameObject.name}). Marked DontDestroyOnLoad.", gameObject);
 
-        DontDestroyOnLoad(gameObject);
-        InitializeReferences();
+            // Initialize references ONLY for the true singleton instance the first time Awake runs.
+            InitializeReferences();
+        }
+        // If Instance == this, Awake might have been called again (e.g., re-enabling object),
+        // but we don't need to re-initialize or DontDestroyOnLoad again.
 
+        // Ensure SceneManager.sceneLoaded is subscribed only once by the singleton instance
+        // Always remove first to prevent duplicates if Awake somehow runs again on the singleton
+        SceneManager.sceneLoaded -= OnSceneLoaded;
         SceneManager.sceneLoaded += OnSceneLoaded;
     }
 
     void InitializeReferences()
     {
+        Debug.Log($"CircleTransition ({gameObject.name}): Initializing references.");
+
+        // Ensure AudioSource exists
         audioSource = GetComponent<AudioSource>();
         if (audioSource == null)
         {
             audioSource = gameObject.AddComponent<AudioSource>();
+            audioSource.playOnAwake = false; // Important!
+            audioSource.loop = false;
+            // Consider adding spatialBlend = 0 if it should always be 2D UI sound
+            audioSource.spatialBlend = 0;
         }
-        audioSource.playOnAwake = false;
 
-        transitionEffectCanvas = GetComponentInChildren<Canvas>(true);
+        // Check if essential components are assigned via Inspector (preferred)
         if (transitionEffectCanvas == null)
         {
-            Debug.LogError("CircleTransition: TransitionEffectCanvas not found as a child! Script will be disabled.", gameObject);
-            enabled = false; // Disable script if canvas not found
+            Debug.LogError("CircleTransition: TransitionEffectCanvas is not assigned in the Inspector! Transitions will likely fail.", gameObject);
+            enabled = false; // Disable script if core component is missing
             return;
         }
+         if (startVideoPlayer == null) Debug.LogError("CircleTransition: Start VideoPlayer is not assigned in the Inspector!", gameObject);
+         if (endVideoPlayer == null) Debug.LogError("CircleTransition: End VideoPlayer is not assigned in the Inspector!", gameObject);
+         if (startRawImage == null) Debug.LogError("CircleTransition: Start RawImage is not assigned in the Inspector!", gameObject);
+         if (endRawImage == null) Debug.LogError("CircleTransition: End RawImage is not assigned in the Inspector!", gameObject);
 
-        // Attempt to find components - Consider assigning these via Inspector for reliability
-        startVideoPlayer = transitionEffectCanvas.transform.Find("Transition Start - VideoPlayer")?.GetComponent<VideoPlayer>();
-        endVideoPlayer = transitionEffectCanvas.transform.Find("Transition End - VideoPlayer")?.GetComponent<VideoPlayer>();
-        startRawImage = transitionEffectCanvas.transform.Find("Transition Start - RawImage")?.GetComponent<RawImage>();
-        endRawImage = transitionEffectCanvas.transform.Find("Transition End - RawImage")?.GetComponent<RawImage>();
 
-        if (startVideoPlayer == null || endVideoPlayer == null || startRawImage == null || endRawImage == null)
-        {
-             Debug.LogError("CircleTransition: One or more components (VideoPlayer/RawImage) not found under the canvas! Please check names or assign via Inspector.", gameObject);
-             // Script continues but transitions might fail partially.
-        }
-
-        // Setup even if some components are missing, but check within SetupVideoPlayer
+        // Setup video players (even if null, the method handles checks)
         SetupVideoPlayer(startVideoPlayer, startRawImage);
         SetupVideoPlayer(endVideoPlayer, endRawImage);
 
-        // Initial state - Make sure the canvas itself is active, but children are not
+        // Initial state: Ensure canvas is active, but visual elements are hidden
         transitionEffectCanvas.gameObject.SetActive(true);
         if (startVideoPlayer) startVideoPlayer.gameObject.SetActive(false);
         if (startRawImage) startRawImage.gameObject.SetActive(false);
@@ -89,57 +113,62 @@ public class CircleTransition : MonoBehaviour
     {
         if (player == null)
         {
-            // No need to log here, InitializeReferences already warned if null
-            return;
+            // Log if the corresponding RawImage exists but player doesn't
+            if(rawImage != null) Debug.LogWarning($"CircleTransition: VideoPlayer is null, but RawImage '{rawImage.name}' exists. Image will not be used.", gameObject);
+            return; // Nothing to set up
         }
 
         player.playOnAwake = false;
-        player.Stop();
+        player.Stop(); // Ensure it's stopped initially
         player.isLooping = false;
-        player.audioOutputMode = VideoAudioOutputMode.None;
+        player.audioOutputMode = VideoAudioOutputMode.None; // Manage audio via AudioSource component
+
+        // Subscribe to know when video is ready to play smoothly
         player.prepareCompleted -= OnVideoPrepared; // Remove first to prevent duplicates
         player.prepareCompleted += OnVideoPrepared;
 
-
-        if (rawImage != null) // Only configure RawImage if it exists
+        // Configure RawImage if it exists and the player uses a RenderTexture
+        if (rawImage != null)
         {
             if (player.renderMode == VideoRenderMode.RenderTexture)
             {
                 if (player.targetTexture != null)
                 {
                     rawImage.texture = player.targetTexture;
-                    rawImage.color = Color.white; // Ensure visible
+                    rawImage.color = Color.white; // Ensure it's visible (alpha = 1)
+                    rawImage.gameObject.SetActive(false); // Keep it inactive until needed
                 }
                 else
                 {
-                    Debug.LogWarning($"VideoPlayer {player.name} is set to RenderTexture mode but has no target texture assigned. RawImage will be hidden.", player);
-                    rawImage.gameObject.SetActive(false); // Hide if no texture
+                    Debug.LogWarning($"VideoPlayer {player.name} is set to RenderTexture mode but has no target texture assigned. RawImage '{rawImage.name}' will be hidden.", player);
+                    rawImage.texture = null; // Clear texture reference
+                    rawImage.gameObject.SetActive(false); // Ensure it's hidden
                 }
             }
-            else
+            else // Player doesn't use RenderTexture
             {
-                // Hide RawImage if the VideoPlayer isn't rendering to a texture
-                // Debug.Log($"VideoPlayer {player.name} is not using RenderTexture mode. Hiding RawImage.", player);
+                // Debug.Log($"VideoPlayer {player.name} is not using RenderTexture mode. Hiding RawImage '{rawImage.name}'.", player);
+                rawImage.texture = null;
                 rawImage.gameObject.SetActive(false);
             }
-        } else {
-             // No need to log here, InitializeReferences already warned if null
         }
     }
 
-
     void OnVideoPrepared(VideoPlayer source)
     {
+        // This callback confirms the video is ready internally. Good for debugging.
         // Debug.Log($"{source.name} Prepared and ready to play.");
-        // This callback confirms the video is ready internally.
     }
 
     void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
-        Debug.Log($"CircleTransition - Scene loaded: {scene.name} (Mode: {mode})");
+        // Ensure this logic only runs on the singleton instance
+        if (Instance != this) return;
 
-        // Explicitly hide end transition elements from the *previous* transition,
-        // just in case they were somehow left active.
+        Debug.Log($"CircleTransition Instance ({gameObject.name}) - Scene loaded: {scene.name} (Mode: {mode})");
+
+        // Force-hide end transition elements from the *previous* transition,
+        // just in case they were somehow left active due to an error or interruption.
         if (endVideoPlayer != null && endVideoPlayer.gameObject.activeSelf)
         {
             Debug.LogWarning("CircleTransition: End VideoPlayer was still active on scene load. Stopping and hiding.", endVideoPlayer);
@@ -152,30 +181,29 @@ public class CircleTransition : MonoBehaviour
             endRawImage.gameObject.SetActive(false);
         }
 
-        // Reset state flag after potential cleanup
+        // Reset the transitioning flag, ready for the next request.
         isTransitioning = false;
-        Debug.Log("CircleTransition: Ready for next transition.");
+        Debug.Log($"CircleTransition Instance ({gameObject.name}): Ready for next transition.");
     }
 
-    // Public method to start transition to a SPECIFIC scene
+    // Public method to start transition to a SPECIFIC scene by name or path
     public void StartTransitionToScene(string sceneName, Action onTransitionComplete = null)
     {
-        if (isTransitioning)
-        {
-            Debug.LogWarning("CircleTransition: Transition already in progress. Request ignored.", gameObject);
-            return;
-        }
+        if (!EnsureReadyForTransition()) return; // Check if already transitioning or invalid scene name
+
         if (string.IsNullOrEmpty(sceneName))
         {
              Debug.LogError("CircleTransition: Scene name provided to StartTransitionToScene is null or empty.", gameObject);
              return;
         }
-        if (SceneManager.GetActiveScene().name == sceneName)
-        {
-             Debug.LogWarning($"CircleTransition: Already in scene '{sceneName}'. Transition request ignored.", gameObject);
-             return;
-        }
-        Debug.Log($"CircleTransition: Received request to transition to scene '{sceneName}'");
+        // Optional: Prevent transitioning to the same scene?
+        // if (SceneManager.GetActiveScene().name == sceneName || SceneManager.GetActiveScene().path == sceneName)
+        // {
+        //      Debug.LogWarning($"CircleTransition: Already in scene '{sceneName}'. Transition request ignored.", gameObject);
+        //      return;
+        // }
+
+        Debug.Log($"CircleTransition: Received request to transition to specific scene '{sceneName}'");
         targetSceneNameToLoad = sceneName; // Store the target scene
         StartCoroutine(TransitionSequence(onTransitionComplete));
     }
@@ -183,11 +211,7 @@ public class CircleTransition : MonoBehaviour
     // Public method to start transition to the NEXT scene in build settings
     public void LoadNextSceneWithTransition(Action onTransitionComplete = null)
     {
-        if (isTransitioning)
-        {
-             Debug.LogWarning("CircleTransition: Transition already in progress. Request ignored.", gameObject);
-             return;
-        }
+        if (!EnsureReadyForTransition()) return; // Check if already transitioning
 
         int currentSceneIndex = SceneManager.GetActiveScene().buildIndex;
         int nextSceneIndex = currentSceneIndex + 1;
@@ -195,32 +219,36 @@ public class CircleTransition : MonoBehaviour
         if (nextSceneIndex >= SceneManager.sceneCountInBuildSettings)
         {
             Debug.LogWarning("CircleTransition: No next scene in build settings. Transition request ignored.", gameObject);
+            isTransitioning = false; // Reset flag if we aborted early
             return;
         }
 
         Debug.Log($"CircleTransition: Received request to transition to next scene (Index: {nextSceneIndex}).");
-        targetSceneNameToLoad = null; // Ensure no specific target is set
+        targetSceneNameToLoad = null; // Clear specific target name, ensuring next scene logic runs
         StartCoroutine(TransitionSequence(onTransitionComplete));
     }
 
-
-    // Kept for potential backward compatibility if needed
-     public void StartTransition(Action onTransitionComplete = null)
-     {
-         LoadNextSceneWithTransition(onTransitionComplete); // Forward to the explicit next scene logic
-     }
+    // Helper to check if a transition can start
+    private bool EnsureReadyForTransition()
+    {
+        if (isTransitioning)
+        {
+            Debug.LogWarning("CircleTransition: Transition already in progress. Request ignored.", gameObject);
+            return false;
+        }
+         if (Instance != this) // Should not happen if singleton logic is correct, but good safeguard
+         {
+             Debug.LogError("CircleTransition: Attempted to start transition from a non-singleton instance! This should not happen.", gameObject);
+             return false;
+         }
+        isTransitioning = true; // Set flag EARLY to prevent race conditions
+        return true;
+    }
 
 
     IEnumerator TransitionSequence(Action onTransitionComplete = null)
     {
-        // Double-check state flag at the very start
-        if (isTransitioning)
-        {
-             Debug.LogWarning("CircleTransition: TransitionSequence started while already transitioning. Exiting.", gameObject);
-             yield break;
-        }
-        isTransitioning = true;
-        Debug.Log("CircleTransition: TransitionSequence started.");
+        Debug.Log($"CircleTransition Instance ({gameObject.name}): TransitionSequence started.");
 
         // --- Start Transition ---
         if (startTransitionSound != null && audioSource != null)
@@ -228,225 +256,197 @@ public class CircleTransition : MonoBehaviour
             audioSource.PlayOneShot(startTransitionSound);
         }
 
-        bool startTransitionPlayed = false; // Flag to track if start transition was attempted
-        if (startVideoPlayer != null) // Check player exists first
+        bool startTransitionPlayed = false;
+        if (startVideoPlayer != null)
         {
-            // Activate the player object
-            startVideoPlayer.gameObject.SetActive(true);
+            startVideoPlayer.gameObject.SetActive(true); // Activate player object
 
-            // Handle RawImage setup only if it exists and player uses RenderTexture
-            if (startRawImage != null && startVideoPlayer.renderMode == VideoRenderMode.RenderTexture)
-            {
-                if (startVideoPlayer.targetTexture != null) {
-                    startRawImage.texture = startVideoPlayer.targetTexture;
-                    startRawImage.color = Color.white; // Ensure it's visible when activated
-                    // Don't activate the RawImage GameObject yet
-                } else {
-                    Debug.LogWarning($"CircleTransition: Start VideoPlayer has no target texture for RawImage.", startVideoPlayer);
-                    startRawImage.gameObject.SetActive(false); // Ensure it's off if no texture
-                }
-            }
-            else if (startRawImage != null) // If RawImage exists but player doesn't use RT
-            {
-                 startRawImage.gameObject.SetActive(false); // Ensure it's off
-            }
+            // Activate RawImage only if valid setup
+             bool useStartRawImage = (startRawImage != null && startVideoPlayer.renderMode == VideoRenderMode.RenderTexture && startVideoPlayer.targetTexture != null);
+             if (useStartRawImage)
+             {
+                // Set texture just in case it was unset
+                startRawImage.texture = startVideoPlayer.targetTexture;
+                startRawImage.color = Color.white;
+             }
+             else if (startRawImage != null) // If raw image exists but isn't used, ensure it's off
+             {
+                  startRawImage.gameObject.SetActive(false);
+             }
 
-            // Prepare the video
             startVideoPlayer.Prepare();
             Debug.Log("CircleTransition: Preparing Start Video...");
             yield return new WaitUntil(() => startVideoPlayer.isPrepared);
             Debug.Log("CircleTransition: Start Video Prepared.");
 
-            // Activate RawImage *after* Prepare, only if needed
-            if (startRawImage != null && startVideoPlayer.renderMode == VideoRenderMode.RenderTexture && startVideoPlayer.targetTexture != null)
+            // Activate the RawImage *just before* playing, only if needed
+            if (useStartRawImage)
             {
-                startRawImage.gameObject.SetActive(true); // Activate the image NOW
+                startRawImage.gameObject.SetActive(true);
             }
 
-            // Play the video
             Debug.Log("CircleTransition: Playing Start Video...");
             startVideoPlayer.Play();
-            startTransitionPlayed = true; // Mark that we started the video
+            startTransitionPlayed = true;
         }
         else
         {
-            Debug.LogWarning("CircleTransition: Start VideoPlayer is missing. Skipping start transition video.", gameObject);
-             // We still need to wait for the duration if startRawImage might be used alone (unlikely setup)
-             // or just to maintain timing. If no visual start is possible, consider shortening this wait.
+            Debug.LogWarning("CircleTransition: Start VideoPlayer is missing or not assigned. Skipping start transition video.", gameObject);
+            // If no video, we might still want a minimal delay or potentially show the raw image if configured differently?
+            // For now, we just skip the video part but still wait the duration.
         }
 
-        // Wait for the duration of the start video segment
+        // Wait for the expected duration of the start transition
         yield return new WaitForSeconds(startVideoDuration);
-        Debug.Log("CircleTransition: Start transition video duration elapsed. Scene load starts now.");
+        Debug.Log("CircleTransition: Start transition visual duration elapsed.");
 
         // --- Scene Loading ---
         AsyncOperation asyncLoad = null;
         bool sceneLoadInitiated = false;
         string sceneToLoadDebugName = "N/A";
-        int sceneIndexToLoad = -1;
 
+        // Decide which scene to load (Specific Target vs Next)
         if (!string.IsNullOrEmpty(targetSceneNameToLoad))
         {
-            // Validate scene existence before attempting load
-            sceneIndexToLoad = SceneUtility.GetBuildIndexByScenePath(targetSceneNameToLoad); // More robust check
-            if (sceneIndexToLoad >= 0) // Scene exists in build settings
-            {
-                 sceneToLoadDebugName = targetSceneNameToLoad;
-                 Debug.Log($"CircleTransition: Loading target scene: {sceneToLoadDebugName} (Index: {sceneIndexToLoad})");
-                 asyncLoad = SceneManager.LoadSceneAsync(sceneIndexToLoad, LoadSceneMode.Single); // Use index for LoadSceneAsync
-                 sceneLoadInitiated = true;
-            } else if (Application.CanStreamedLevelBeLoaded(targetSceneNameToLoad)) {
-                 // Fallback for potentially valid scene path not found by GetBuildIndexByScenePath (less common)
-                 sceneToLoadDebugName = targetSceneNameToLoad;
-                 Debug.LogWarning($"CircleTransition: GetBuildIndexByScenePath failed for '{targetSceneNameToLoad}', but CanStreamedLevelBeLoaded is true. Attempting load by name/path.", gameObject);
+            // Try loading the specific scene stored earlier
+            sceneToLoadDebugName = targetSceneNameToLoad;
+             // Check if the scene exists in build settings before loading by name/path
+            if (Application.CanStreamedLevelBeLoaded(targetSceneNameToLoad)) {
+                 Debug.Log($"CircleTransition: Loading target scene by name/path: {sceneToLoadDebugName}");
                  asyncLoad = SceneManager.LoadSceneAsync(targetSceneNameToLoad, LoadSceneMode.Single);
                  sceneLoadInitiated = true;
             } else {
-                 Debug.LogError($"CircleTransition: Scene '{targetSceneNameToLoad}' cannot be loaded. Check it exists and is added to Build Settings.", gameObject);
+                int sceneIndex = SceneUtility.GetBuildIndexByScenePath(targetSceneNameToLoad);
+                if (sceneIndex >= 0) {
+                     Debug.Log($"CircleTransition: Loading target scene by index derived from path: {sceneToLoadDebugName} (Index: {sceneIndex})");
+                     asyncLoad = SceneManager.LoadSceneAsync(sceneIndex, LoadSceneMode.Single);
+                     sceneLoadInitiated = true;
+                } else {
+                    Debug.LogError($"CircleTransition: Scene '{targetSceneNameToLoad}' cannot be loaded. Check name/path and ensure it's in Build Settings.", gameObject);
+                }
             }
-            // Clear target name after deciding to load or erroring
-            targetSceneNameToLoad = null;
+            targetSceneNameToLoad = null; // Clear the target after attempting load
         }
-        else // Load next scene
+        else // Load the next scene in build order
         {
             int currentSceneIndex = SceneManager.GetActiveScene().buildIndex;
-            sceneIndexToLoad = currentSceneIndex + 1;
+            int nextSceneIndex = currentSceneIndex + 1;
 
-            if (sceneIndexToLoad < SceneManager.sceneCountInBuildSettings)
+            if (nextSceneIndex < SceneManager.sceneCountInBuildSettings)
             {
-                // Get scene path for better logging
-                string scenePath = SceneUtility.GetScenePathByBuildIndex(sceneIndexToLoad);
-                sceneToLoadDebugName = System.IO.Path.GetFileNameWithoutExtension(scenePath); // Extract scene name
-                Debug.Log($"CircleTransition: Loading next scene: {sceneToLoadDebugName} (Index: {sceneIndexToLoad})");
-                asyncLoad = SceneManager.LoadSceneAsync(sceneIndexToLoad, LoadSceneMode.Single);
+                string scenePath = SceneUtility.GetScenePathByBuildIndex(nextSceneIndex);
+                sceneToLoadDebugName = System.IO.Path.GetFileNameWithoutExtension(scenePath); // Get cleaner name for logging
+                Debug.Log($"CircleTransition: Loading next scene: {sceneToLoadDebugName} (Index: {nextSceneIndex})");
+                asyncLoad = SceneManager.LoadSceneAsync(nextSceneIndex, LoadSceneMode.Single);
                 sceneLoadInitiated = true;
             }
             else
             {
-                Debug.LogWarning("CircleTransition: No next scene in build settings.", gameObject);
+                 Debug.LogError("CircleTransition: Attempted to load next scene, but there are no more scenes in build settings!", gameObject);
             }
         }
 
-
+        // If loading failed to start, abort the transition
         if (!sceneLoadInitiated || asyncLoad == null)
         {
             Debug.LogError("CircleTransition: Scene load operation could not be initiated. Aborting transition.", gameObject);
-             // Clean up start transition visuals immediately if load fails
-             if (startVideoPlayer != null && startVideoPlayer.gameObject.activeSelf) {
-                  startVideoPlayer.Stop();
-                  startVideoPlayer.gameObject.SetActive(false);
-             }
-             if (startRawImage != null && startRawImage.gameObject.activeSelf) {
-                  startRawImage.gameObject.SetActive(false);
-             }
+            // Clean up start transition visuals immediately
+             if (startVideoPlayer != null && startVideoPlayer.gameObject.activeSelf) { startVideoPlayer.Stop(); startVideoPlayer.gameObject.SetActive(false); }
+             if (startRawImage != null && startRawImage.gameObject.activeSelf) { startRawImage.gameObject.SetActive(false); }
             isTransitioning = false; // Reset flag on failure
             onTransitionComplete?.Invoke(); // Signal completion (or failure)
             yield break; // Exit coroutine
         }
 
-        // --- Wait for Load, Keeping Start Transition Visible ---
+        // --- Wait for Load, Keep Start Transition Visible ---
         asyncLoad.allowSceneActivation = false;
         Debug.Log("CircleTransition: Waiting for scene load (allowSceneActivation=false)...");
-        while (asyncLoad.progress < 0.9f) // Wait until scene is almost ready
+        while (asyncLoad.progress < 0.9f) // 0.9f means loading is done, ready for activation
         {
-             // You could update a progress bar here using asyncLoad.progress
-            yield return null;
+            // Optional: Update a loading progress UI element here
+            yield return null; // Wait for the next frame
         }
         Debug.Log("CircleTransition: Scene loaded to 90%. Ready for activation.");
-        // ** Start transition video/image is still visible here **
 
         // --- Activate Scene ---
+        // At this point, the start transition (video/image) is still visible.
         Debug.Log("CircleTransition: Activating scene...");
         asyncLoad.allowSceneActivation = true;
-        // Wait until the scene is fully loaded and activated
+        // Wait until the scene is fully activated (OnSceneLoaded callback will fire during this)
         yield return new WaitUntil(() => asyncLoad.isDone);
-        // SceneManager.sceneLoaded callback will fire around here
         Debug.Log($"CircleTransition: Scene '{sceneToLoadDebugName}' activated.");
 
+        // --- End Transition --- (Plays *after* new scene is active and OnSceneLoaded has run)
+        Debug.Log("CircleTransition: Preparing end transition visuals/sound...");
 
-        // --- End Transition --- (Plays *after* new scene is active)
-        Debug.Log("CircleTransition: Preparing end transition video/sound...");
         if (endTransitionSound != null && audioSource != null)
         {
             audioSource.PlayOneShot(endTransitionSound);
         }
 
-        bool endTransitionWillPlay = false; // Flag to track if end transition is valid
-        if (endVideoPlayer != null) // Check player exists
+        bool endTransitionWillPlay = false;
+        if (endVideoPlayer != null)
         {
             endVideoPlayer.gameObject.SetActive(true);
 
-            // Handle RawImage setup only if it exists and player uses RenderTexture
-            if (endRawImage != null && endVideoPlayer.renderMode == VideoRenderMode.RenderTexture)
+            // Activate RawImage only if valid setup
+            bool useEndRawImage = (endRawImage != null && endVideoPlayer.renderMode == VideoRenderMode.RenderTexture && endVideoPlayer.targetTexture != null);
+            if(useEndRawImage)
             {
-                if (endVideoPlayer.targetTexture != null) {
-                    endRawImage.texture = endVideoPlayer.targetTexture;
-                    endRawImage.color = Color.white;
-                    // Don't activate GameObject yet
-                } else {
-                     Debug.LogWarning($"CircleTransition: End VideoPlayer has no target texture for RawImage.", endVideoPlayer);
-                     endRawImage.gameObject.SetActive(false); // Ensure it's off
-                }
+                endRawImage.texture = endVideoPlayer.targetTexture;
+                endRawImage.color = Color.white;
             } else if (endRawImage != null) {
-                 endRawImage.gameObject.SetActive(false); // Ensure it's off
+                endRawImage.gameObject.SetActive(false);
             }
 
-            // Prepare the end video
+
             endVideoPlayer.Prepare();
             Debug.Log("CircleTransition: Preparing End Video...");
             yield return new WaitUntil(() => endVideoPlayer.isPrepared);
             Debug.Log("CircleTransition: End Video Prepared.");
 
-            // Activate End RawImage *after* prepare, only if needed
-            if (endRawImage != null && endVideoPlayer.renderMode == VideoRenderMode.RenderTexture && endVideoPlayer.targetTexture != null)
-            {
-                 endRawImage.gameObject.SetActive(true); // Make end image visible NOW
-            }
+            // Activate RawImage just before playing
+             if(useEndRawImage)
+             {
+                  endRawImage.gameObject.SetActive(true);
+             }
 
-            endTransitionWillPlay = true; // Mark that we are ready to play the end video
+            endTransitionWillPlay = true;
         }
         else
         {
-            Debug.LogWarning("CircleTransition: End VideoPlayer is missing. Skipping end transition video.", gameObject);
+            Debug.LogWarning("CircleTransition: End VideoPlayer is missing or not assigned. Skipping end transition video.", gameObject);
         }
 
-        // --- Hide Start Transition NOW, just before playing End ---
-        if (startTransitionPlayed) // Only hide if it was shown in the first place
+        // --- Hide Start Transition NOW ---
+        // This happens just before the end transition visuals appear
+        if (startTransitionPlayed)
         {
             Debug.Log("CircleTransition: Hiding start transition elements.");
-            if (startVideoPlayer != null && startVideoPlayer.gameObject.activeSelf) {
-                 startVideoPlayer.Stop(); // Stop playback if it was running
-                 startVideoPlayer.gameObject.SetActive(false);
-            }
-            if (startRawImage != null && startRawImage.gameObject.activeSelf) {
-                 // No need to stop RawImage, just hide
-                 startRawImage.gameObject.SetActive(false);
-            }
+            if (startVideoPlayer != null && startVideoPlayer.gameObject.activeSelf) { startVideoPlayer.Stop(); startVideoPlayer.gameObject.SetActive(false); }
+            if (startRawImage != null && startRawImage.gameObject.activeSelf) { startRawImage.gameObject.SetActive(false); }
         }
-        // --- End of Hiding Start Transition ---
 
-        // Now play the end video if it's ready
+        // --- Play End Transition ---
         if (endTransitionWillPlay)
         {
             Debug.Log("CircleTransition: Playing End Video...");
-            endVideoPlayer.Play(); // Play the end video
+            endVideoPlayer.Play();
             yield return new WaitForSeconds(endVideoDuration); // Wait for its duration
-            Debug.Log("CircleTransition: End transition video duration elapsed.");
+            Debug.Log("CircleTransition: End transition visual duration elapsed.");
         }
         else
         {
-             // If no end video, maybe wait a very short fixed time or proceed immediately?
-             // This prevents an abrupt jump if the end transition fails.
-             // yield return new WaitForSeconds(0.1f);
-             Debug.Log("CircleTransition: Skipping end transition duration wait.");
+            // If no end video, maybe wait a very brief moment or proceed immediately.
+            // yield return null; // Wait one frame
+            Debug.Log("CircleTransition: Skipping end transition duration wait.");
         }
-
 
         // --- Clean Up End Transition ---
         Debug.Log("CircleTransition: Cleaning up end transition elements.");
         if (endVideoPlayer != null && endVideoPlayer.gameObject.activeSelf)
         {
-            endVideoPlayer.Stop(); // Ensure stopped
+            endVideoPlayer.Stop();
             endVideoPlayer.gameObject.SetActive(false);
         }
         if (endRawImage != null && endRawImage.gameObject.activeSelf)
@@ -455,27 +455,45 @@ public class CircleTransition : MonoBehaviour
         }
 
         // --- Final State Reset ---
-        isTransitioning = false;
-        Debug.Log("CircleTransition: TransitionSequence finished successfully.");
-        onTransitionComplete?.Invoke(); // Signal completion
+        // isTransitioning flag is reset in OnSceneLoaded, which should have fired by now.
+        // If OnSceneLoaded didn't reset it (e.g., if the singleton instance was somehow lost), reset it here as a safeguard.
+        if (isTransitioning)
+        {
+            Debug.LogWarning("CircleTransition: isTransitioning flag was still true at the end of TransitionSequence. Resetting now.", gameObject);
+            isTransitioning = false;
+        }
+        Debug.Log($"CircleTransition Instance ({gameObject.name}): TransitionSequence finished successfully.");
+        onTransitionComplete?.Invoke(); // Signal completion callback if provided
     }
 
 
     void OnDestroy()
     {
-        // Unsubscribe from events to prevent memory leaks and errors
+        // This method is called when the GameObject is destroyed
+        Debug.Log($"CircleTransition: OnDestroy called for {gameObject.name} (InstanceID: {gameObject.GetInstanceID()}).", gameObject);
+
+        // Unsubscribe from events to prevent errors and memory leaks
         SceneManager.sceneLoaded -= OnSceneLoaded;
 
         if (startVideoPlayer != null) {
              startVideoPlayer.prepareCompleted -= OnVideoPrepared;
-             // Optional: Explicitly release resources if needed, though Unity often handles this.
-             // startVideoPlayer.targetTexture?.Release();
+             // Optional: Release RenderTexture if needed, although Unity usually manages this.
+             // if (startVideoPlayer.targetTexture != null) startVideoPlayer.targetTexture.Release();
         }
         if (endVideoPlayer != null) {
              endVideoPlayer.prepareCompleted -= OnVideoPrepared;
-             // endVideoPlayer.targetTexture?.Release();
+             // if (endVideoPlayer.targetTexture != null) endVideoPlayer.targetTexture.Release();
         }
 
-        Debug.Log("CircleTransition: Destroyed and cleaned up listeners.", gameObject);
+        // --- Singleton Cleanup ---
+        // If the instance being destroyed is the currently active singleton instance,
+        // clear the static reference so the pattern works correctly if the game restarts
+        // or another instance tries to become the singleton later.
+        if (Instance == this)
+        {
+            Instance = null;
+            Debug.Log("CircleTransition: Singleton instance destroyed and static reference cleared.", gameObject);
+        }
+        // --- End Singleton Cleanup ---
     }
 }
