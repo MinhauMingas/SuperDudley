@@ -2,6 +2,9 @@
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
+// Required for DefaultFormat
+using UnityEngine.Experimental.Rendering;
+
 
 namespace kTools.Mirrors
 {
@@ -15,7 +18,7 @@ namespace kTools.Mirrors
 #region Enumerations
         /// <summary>
         /// Camera override enumeration for Mirror properties
-        /// <summary>
+        /// </summary>
         public enum MirrorCameraOverride
         {
             UseSourceCameraSettings,
@@ -24,7 +27,7 @@ namespace kTools.Mirrors
 
         /// <summary>
         /// Scope enumeration for Mirror output destination
-        /// <summary>
+        /// </summary>
         public enum OutputScope
         {
             Global,
@@ -37,7 +40,7 @@ namespace kTools.Mirrors
         float m_Offset;
 
         [SerializeField]
-        int m_LayerMask;
+        LayerMask m_LayerMask = -1;
 
         [SerializeField]
         OutputScope m_Scope;
@@ -61,14 +64,13 @@ namespace kTools.Mirrors
         UniversalAdditionalCameraData m_CameraData;
         RenderTexture m_RenderTexture;
         RenderTextureDescriptor m_PreviousDescriptor;
+        private static readonly ProfilingSampler s_MirrorProfilingSampler = new ProfilingSampler("Mirror Rendering");
 #endregion
 
 #region Constructors
         public Mirror()
         {
-            // Set data
             m_Offset = 0.01f;
-            m_LayerMask = -1;
             m_Scope = OutputScope.Global;
             m_Renderers = new List<Renderer>();
             m_TextureScale = 1.0f;
@@ -78,52 +80,42 @@ namespace kTools.Mirrors
 #endregion
 
 #region Properties
-        /// <summary>Offset value for oplique near clip plane.</summary>
-        public float offest
+        public float offset
         {
             get => m_Offset;
             set => m_Offset = value;
         }
 
-        /// <summary>Which layers should the Mirror render.</summary>
         public LayerMask layerMask
         {
             get => m_LayerMask;
             set => m_LayerMask = value;
         }
 
-        /// <summary>
-        /// Global output renders to the global texture. Only one Mirror can be global.
-        /// Local output renders to one texture per Mirror, this is set on all elements of the Renderers list.
-        /// </summary>
         public OutputScope scope
         {
             get => m_Scope;
             set => m_Scope = value;
         }
 
-        /// <summary>Renderers to set the reflection texture on.</summary>
         public List<Renderer> renderers
         {
             get => m_Renderers;
             set => m_Renderers = value;
         }
 
-        /// <summary>Scale value applied to the size of the source camera texture.</summary>
         public float textureScale
         {
             get => m_TextureScale;
             set => m_TextureScale = value;
         }
 
-        /// <summary>Should reflections be rendered in HDR.</summary>
         public MirrorCameraOverride allowHDR
         {
             get => m_AllowHDR;
             set => m_AllowHDR = value;
         }
 
-        /// <summary>Should reflections be resolved with MSAA.</summary>
         public MirrorCameraOverride allowMSAA
         {
             get => m_AllowMSAA;
@@ -134,7 +126,8 @@ namespace kTools.Mirrors
         {
             get
             {
-                if(m_ReflectionCamera == null)
+                // Ensure component is fetched only once if null
+                if (m_ReflectionCamera == null)
                     m_ReflectionCamera = GetComponent<Camera>();
                 return m_ReflectionCamera;
             }
@@ -144,7 +137,8 @@ namespace kTools.Mirrors
         {
             get
             {
-                if(m_CameraData == null)
+                 // Ensure component is fetched only once if null
+                if (m_CameraData == null)
                     m_CameraData = GetComponent<UniversalAdditionalCameraData>();
                 return m_CameraData;
             }
@@ -154,107 +148,159 @@ namespace kTools.Mirrors
 #region State
         void OnEnable()
         {
-            // Callbacks
             RenderPipelineManager.beginCameraRendering += BeginCameraRendering;
-            
-            // Initialize Components
-            InitializeCamera();
+            InitializeCamera(); // Initialize camera settings on enable
         }
 
         void OnDisable()
         {
-            // Callbacks
             RenderPipelineManager.beginCameraRendering -= BeginCameraRendering;
-
-            // Dispose RenderTexture
             SafeDestroyObject(m_RenderTexture);
+            m_RenderTexture = null;
+            m_PreviousDescriptor = default;
         }
 #endregion
 
 #region Initialization
         void InitializeCamera()
         {
-            // Setup Camera
+            // Check if component exists before accessing
+            if (reflectionCamera == null || cameraData == null)
+            {
+                 Debug.LogWarning("Mirror requires both Camera and UniversalAdditionalCameraData components.", this);
+                 enabled = false; // Disable the component if setup is invalid
+                 return;
+            }
+
             reflectionCamera.cameraType = CameraType.Reflection;
+            reflectionCamera.enabled = false;
             reflectionCamera.targetTexture = m_RenderTexture;
 
-            // Setup AdditionalCameraData
             cameraData.renderShadows = false;
             cameraData.requiresColorOption = CameraOverrideOption.Off;
             cameraData.requiresDepthOption = CameraOverrideOption.Off;
+            cameraData.renderPostProcessing = false;
         }
 #endregion
 
 #region RenderTexture
         RenderTextureDescriptor GetDescriptor(Camera camera)
         {
-            // Get scaled Texture size
             var width = (int)Mathf.Max(camera.pixelWidth * textureScale, 4);
             var height = (int)Mathf.Max(camera.pixelHeight * textureScale, 4);
 
-            // Get Texture format
             var hdr = allowHDR == MirrorCameraOverride.UseSourceCameraSettings ? camera.allowHDR : false;
-            var renderTextureFormat = hdr ? RenderTextureFormat.DefaultHDR : RenderTextureFormat.Default;
-            return new RenderTextureDescriptor(width, height, renderTextureFormat, 16) { autoGenerateMips = true, useMipMap = true };
+             // --- FIX: Use UnityEngine.Experimental.Rendering.DefaultFormat ---
+            var graphicsFormat = hdr ? SystemInfo.GetGraphicsFormat(UnityEngine.Experimental.Rendering.DefaultFormat.HDR)
+                                     : SystemInfo.GetGraphicsFormat(UnityEngine.Experimental.Rendering.DefaultFormat.LDR);
+
+            int msaaSamples = 1;
+            var urpAsset = GraphicsSettings.currentRenderPipeline as UniversalRenderPipelineAsset;
+            bool cameraAllowsMSAA = allowMSAA == MirrorCameraOverride.UseSourceCameraSettings ? camera.allowMSAA : false;
+
+            if (cameraAllowsMSAA && urpAsset != null)
+            {
+                msaaSamples = urpAsset.msaaSampleCount;
+            }
+            // Ensure MSAA samples is a power of 2 (1, 2, 4, 8) as expected by graphics APIs
+             msaaSamples = Mathf.Clamp(Mathf.NextPowerOfTwo(msaaSamples)/2, 1, 8);
+
+
+            // --- FIX: Use UnityEngine.Experimental.Rendering.DefaultFormat ---
+            return new RenderTextureDescriptor(width, height, graphicsFormat, SystemInfo.GetGraphicsFormat(UnityEngine.Experimental.Rendering.DefaultFormat.DepthStencil))
+            {
+                 msaaSamples = msaaSamples,
+                 autoGenerateMips = true,
+                 useMipMap = true,
+                 // Ensure depth buffer matches potential MSAA samples if needed (can sometimes cause issues if mismatched)
+                 // depthStencilFormat = GraphicsFormatUtility.GetDepthStencilFormat(24, graphicsFormat) // More advanced if needed
+            };
         }
 #endregion
 
 #region Rendering
         void BeginCameraRendering(ScriptableRenderContext context, Camera camera)
         {
-            // Never render Mirrors for Preview or Reflection cameras
-            if(camera.cameraType == CameraType.Preview || camera.cameraType == CameraType.Reflection)
+            if (camera.cameraType == CameraType.Preview || camera.cameraType == CameraType.Reflection)
                 return;
 
-            // Profiling command
-            CommandBuffer cmd = CommandBufferPool.Get($"Mirror {gameObject.GetInstanceID()}");
-            using (new ProfilingSample(cmd, $"Mirror {gameObject.GetInstanceID()}"))
-            {
-                ExecuteCommand(context, cmd);
+            // Ensure reflection camera is valid and initialized
+            if (reflectionCamera == null || cameraData == null) {
+                 InitializeCamera(); // Try initializing again if null
+                 if (reflectionCamera == null || cameraData == null) return; // Still invalid, exit
+            }
 
-                // Test for Descriptor changes
+            CommandBuffer cmd = CommandBufferPool.Get("Mirror Rendering");
+            using (new ProfilingScope(cmd, s_MirrorProfilingSampler))
+            {
+                ExecuteCommand(context, cmd); // Execute setup commands if any
+
                 var descriptor = GetDescriptor(camera);
-                if(!descriptor.Equals(m_PreviousDescriptor))
+                if (m_RenderTexture == null || !DescriptorsMatch(m_PreviousDescriptor, descriptor))
                 {
-                    // Dispose RenderTexture
-                    if(m_RenderTexture != null)
-                    {
-                        SafeDestroyObject(m_RenderTexture);
-                    }
-                    
-                    // Create new RenderTexture
+                    SafeDestroyObject(m_RenderTexture);
                     m_RenderTexture = new RenderTexture(descriptor);
-                    m_PreviousDescriptor = descriptor;
+                    m_RenderTexture.name = $"Mirror_{gameObject.GetInstanceID()}_RT";
+                    m_PreviousDescriptor = descriptor; // Store the new descriptor
                     reflectionCamera.targetTexture = m_RenderTexture;
                 }
-                
-                // Execute
+
                 RenderMirror(context, camera);
                 SetShaderUniforms(context, m_RenderTexture, cmd);
             }
             ExecuteCommand(context, cmd);
+            CommandBufferPool.Release(cmd);
         }
+
+        // Helper to compare relevant descriptor fields as Equals might be too strict
+        bool DescriptorsMatch(RenderTextureDescriptor d1, RenderTextureDescriptor d2)
+        {
+            return d1.width == d2.width &&
+                   d1.height == d2.height &&
+                   d1.graphicsFormat == d2.graphicsFormat &&
+                   d1.depthStencilFormat == d2.depthStencilFormat &&
+                   d1.msaaSamples == d2.msaaSamples &&
+                   d1.useMipMap == d2.useMipMap &&
+                   d1.autoGenerateMips == d2.autoGenerateMips;
+        }
+
 
         void RenderMirror(ScriptableRenderContext context, Camera camera)
         {
-            // Mirror the view matrix
+            if (reflectionCamera.targetTexture == null)
+            {
+                // This case should be handled by the descriptor check in BeginCameraRendering,
+                // but add a safeguard.
+                Debug.LogError("Mirror Reflection Camera has no target texture.", this);
+                return;
+            }
+
             var mirrorMatrix = GetMirrorMatrix();
             reflectionCamera.worldToCameraMatrix = camera.worldToCameraMatrix * mirrorMatrix;
 
-            // Make oplique projection matrix where near plane is mirror plane
             var mirrorPlane = GetMirrorPlane(reflectionCamera);
             var projectionMatrix = camera.CalculateObliqueMatrix(mirrorPlane);
             reflectionCamera.projectionMatrix = projectionMatrix;
-            
-            // Miscellanious camera settings
+
             reflectionCamera.cullingMask = layerMask;
             reflectionCamera.allowHDR = allowHDR == MirrorCameraOverride.UseSourceCameraSettings ? camera.allowHDR : false;
             reflectionCamera.allowMSAA = allowMSAA == MirrorCameraOverride.UseSourceCameraSettings ? camera.allowMSAA : false;
-            reflectionCamera.enabled = false;
 
-            // Render reflection camera with inverse culling
+
+            if (!reflectionCamera.TryGetCullingParameters(false, out var cullingParams))
+            {
+                return;
+            }
+             // --- FIX: Removed ForceEvenDepthRange ---
+            // cullingParams.cullingOptions &= ~CullingOptions.ForceEvenDepthRange;
+             // --- FIX: Removed maxAdditionalLightsCount setting ---
+            // cullingParams.maximumVisibleLights = cameraData.maxAdditionalLightsCount; // Not needed/available
+
+
+             // --- FIX: Simplified RenderRequest constructor ---
             GL.invertCulling = true;
-            UniversalRenderPipeline.RenderSingleCamera(context, reflectionCamera);
+            context.ExecuteCommandBuffer(CommandBufferPool.Get("Mirror Rendering"));
+            reflectionCamera.Render();
             GL.invertCulling = false;
         }
 #endregion
@@ -262,81 +308,98 @@ namespace kTools.Mirrors
 #region Projection
         Matrix4x4 GetMirrorMatrix()
         {
-            // Setup
             var position = transform.position;
             var normal = transform.forward;
-            var depth = -Vector3.Dot(normal, position) - offest;
 
-            // Create matrix
-            var mirrorMatrix = new Matrix4x4()
-            {
-                m00 = (1f - 2f * normal.x  * normal.x),
-                m01 = (-2f     * normal.x  * normal.y),
-                m02 = (-2f     * normal.x  * normal.z),
-                m03 = (-2f     * depth     * normal.x),
-                m10 = (-2f     * normal.y  * normal.x),
-                m11 = (1f - 2f * normal.y  * normal.y),
-                m12 = (-2f     * normal.y  * normal.z),
-                m13 = (-2f     * depth     * normal.y),
-                m20 = (-2f     * normal.z  * normal.x),
-                m21 = (-2f     * normal.z  * normal.y),
-                m22 = (1f - 2f * normal.z  * normal.z),
-                m23 = (-2f     * depth     * normal.z),
-                m30 = 0f,
-                m31 = 0f,
-                m32 = 0f,
-                m33 = 1f,
-            };
-            return mirrorMatrix;
+            // Plane equation: n.p + d = 0 => d = -n.p
+            // Offset is applied along the normal *before* calculating d
+            float d = -Vector3.Dot(normal, position + normal * offset);
+
+            Matrix4x4 reflectionMat = Matrix4x4.identity;
+            reflectionMat.m00 = 1 - 2 * normal.x * normal.x;
+            reflectionMat.m01 = -2 * normal.x * normal.y;
+            reflectionMat.m02 = -2 * normal.x * normal.z;
+            reflectionMat.m03 = -2 * d * normal.x;
+
+            reflectionMat.m10 = -2 * normal.y * normal.x;
+            reflectionMat.m11 = 1 - 2 * normal.y * normal.y;
+            reflectionMat.m12 = -2 * normal.y * normal.z;
+            reflectionMat.m13 = -2 * d * normal.y;
+
+            reflectionMat.m20 = -2 * normal.z * normal.x;
+            reflectionMat.m21 = -2 * normal.z * normal.y;
+            reflectionMat.m22 = 1 - 2 * normal.z * normal.z;
+            reflectionMat.m23 = -2 * d * normal.z;
+
+            // m30, m31, m32, m33 remain 0, 0, 0, 1
+
+            return reflectionMat;
         }
-    
+
         Vector4 GetMirrorPlane(Camera camera)
         {
-            // Calculate mirror plane in camera space.
-            var pos = transform.position - Vector3.forward * 0.1f;
+            // Plane in world space
+            var pos = transform.position;
             var normal = transform.forward;
-            var offsetPos = pos + normal * offest;
-            var cpos = camera.worldToCameraMatrix.MultiplyPoint(offsetPos);
-            var cnormal = camera.worldToCameraMatrix.MultiplyVector(normal).normalized;
-            return new Vector4(cnormal.x, cnormal.y, cnormal.z, -Vector3.Dot(cpos, cnormal));
+            var offsetPos = pos + normal * offset;
+            var worldPlane = new Plane(normal, offsetPos);
+
+            // Transform plane to view space for CalculateObliqueMatrix
+            Matrix4x4 viewMatrix = camera.worldToCameraMatrix;
+            Matrix4x4 viewMatrixInv = Matrix4x4.Inverse(viewMatrix); // More stable than transposing inverse
+            Vector3 viewPos = viewMatrix.MultiplyPoint(offsetPos);
+            Vector3 viewNormal = viewMatrix.MultiplyVector(normal).normalized; // Use MultiplyVector for normals
+
+            // Plane equation in view space: viewNormal . (p - viewPos) = 0
+            // viewNormal.x*x + viewNormal.y*y + viewNormal.z*z - dot(viewNormal, viewPos) = 0
+            // Vector4 is (normal.x, normal.y, normal.z, -dot(normal, pos))
+            return new Vector4(viewNormal.x, viewNormal.y, viewNormal.z, -Vector3.Dot(viewNormal, viewPos));
         }
 #endregion
 
 #region Output
+        private static readonly int s_ReflectionMapID = Shader.PropertyToID("_ReflectionMap");
+        private static readonly int s_LocalMirrorID = Shader.PropertyToID("_LocalMirror");
+        private static readonly int s_LocalReflectionMapID = Shader.PropertyToID("_LocalReflectionMap");
+        private const string s_BlendMirrorsKeyword = "_BLEND_MIRRORS";
+
         void SetShaderUniforms(ScriptableRenderContext context, RenderTexture renderTexture, CommandBuffer cmd)
         {
-            var block = new MaterialPropertyBlock();
+             if (renderTexture == null) return;
+
+            var block = new MaterialPropertyBlock(); // Pool this if called extremely frequently
             switch(scope)
             {
                 case OutputScope.Global:
-                    // Globals
-                    cmd.SetGlobalTexture("_ReflectionMap", renderTexture);
-                    ExecuteCommand(context, cmd);
+                    cmd.DisableShaderKeyword(s_BlendMirrorsKeyword);
+                    cmd.SetGlobalTexture(s_ReflectionMapID, renderTexture);
 
-                    // Property Blocm
-                    block.SetFloat("_LocalMirror", 0.0f);
-                    foreach(var renderer in renderers)
-                    {
-                        renderer.SetPropertyBlock(block);
+                    block.SetFloat(s_LocalMirrorID, 0.0f);
+                    if (m_Renderers != null) {
+                        foreach(var renderer in m_Renderers)
+                        {
+                             if (renderer != null) renderer.SetPropertyBlock(block);
+                        }
                     }
                     break;
-                case OutputScope.Local:
-                    // Keywords
-                    Shader.EnableKeyword("_BLEND_MIRRORS");
 
-                    // Property Block
-                    block.SetTexture("_LocalReflectionMap", renderTexture);
-                    block.SetFloat("_LocalMirror", 1.0f);
-                    foreach(var renderer in renderers)
-                    {
-                        renderer.SetPropertyBlock(block);
+                case OutputScope.Local:
+                    cmd.EnableShaderKeyword(s_BlendMirrorsKeyword);
+
+                    block.SetTexture(s_LocalReflectionMapID, renderTexture);
+                    block.SetFloat(s_LocalMirrorID, 1.0f);
+                    if (m_Renderers != null) {
+                        foreach(var renderer in m_Renderers)
+                        {
+                             if (renderer != null) renderer.SetPropertyBlock(block);
+                        }
                     }
                     break;
             }
         }
 #endregion
 
-#region CommandBufer
+#region CommandBuffer
         void ExecuteCommand(ScriptableRenderContext context, CommandBuffer cmd)
         {
             context.ExecuteCommandBuffer(cmd);
@@ -347,30 +410,27 @@ namespace kTools.Mirrors
 #region Object
         void SafeDestroyObject(Object obj)
         {
-            if(obj == null)
+            if (obj == null)
                 return;
-            
-            #if UNITY_EDITOR
-            DestroyImmediate(obj);
-            #else
-            Destroy(obj);
-            #endif
+
+            if (Application.isPlaying)
+            {
+                Destroy(obj);
+            }
+            else
+            {
+                DestroyImmediate(obj);
+            }
         }
 #endregion
 
 #region AssetMenu
 #if UNITY_EDITOR
-        // Add a menu item to Mirrors
         [UnityEditor.MenuItem("GameObject/kTools/Mirror", false, 10)]
         static void CreateMirrorObject(UnityEditor.MenuCommand menuCommand)
         {
-            // Create Mirror
             GameObject go = new GameObject("New Mirror", typeof(Mirror));
-            
-            // Transform
             UnityEditor.GameObjectUtility.SetParentAndAlign(go, menuCommand.context as GameObject);
-            
-            // Undo and Selection
             UnityEditor.Undo.RegisterCreatedObjectUndo(go, "Create " + go.name);
             UnityEditor.Selection.activeObject = go;
         }
@@ -381,19 +441,25 @@ namespace kTools.Mirrors
 #if UNITY_EDITOR
         void OnDrawGizmos()
         {
-            // Setup
             var bounds = new Vector3(1.0f, 1.0f, 0.0f);
             var color = new Color32(0, 120, 255, 255);
-            var selectedColor = new Color32(255, 255, 255, 255);
-            var isSelected = UnityEditor.Selection.activeObject == gameObject;
+            var selectedColor = Color.white; // Use white for selected outline
+            var isSelected = UnityEditor.Selection.activeGameObject == gameObject;
 
-            // Draw Gizmos
             Gizmos.matrix = transform.localToWorldMatrix;
             Gizmos.color = isSelected ? selectedColor : color;
-            Gizmos.DrawIcon(transform.position, kGizmoPath, true);
             Gizmos.DrawWireCube(Vector3.zero, bounds);
+
+            Gizmos.color = Color.blue; // Draw normal vector
+            Gizmos.DrawLine(Vector3.zero, Vector3.forward * 0.5f);
+        }
+
+        void OnDrawGizmosSelected()
+        {
+             // Keep icon draw for selected only
+             Gizmos.DrawIcon(transform.position, kGizmoPath, true, Color.white);
         }
 #endif
-#endregion        
+#endregion
     }
 }
